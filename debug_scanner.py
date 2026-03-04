@@ -50,6 +50,8 @@ def debug_pattern(ticker, start_date=None, end_date=None, period="2y"):
     else:
         print(f"Pass: Decline period T1 = {t1_decline_days} days")
 
+    # 2. Analyze the Consolidation Period (T2)
+    # The mathematical base should end 5 days before the end of the query period
     breakout_window = 5
     current_idx = len(prices) - 1
     consolidation_end_idx = current_idx - breakout_window
@@ -79,8 +81,10 @@ def debug_pattern(ticker, start_date=None, end_date=None, period="2y"):
         print("Fail: Consolidation data is empty")
         return
     
-    consolidation_max = np.max(consolidation_data)
-    consolidation_min = np.min(consolidation_data)
+    # NEW: Use 90th percentile and 10th percentile to define the "Core" consolidation band
+    # This ignores the top 10% of wicks, allowing us to find the structural resistance line lower
+    consolidation_max = np.percentile(consolidation_data, 90)
+    consolidation_min = np.percentile(consolidation_data, 10)
     
     avg_price = np.mean(consolidation_data)
     dynamic_max_range = 1.15
@@ -115,13 +119,22 @@ def debug_pattern(ticker, start_date=None, end_date=None, period="2y"):
     else:
         print(f"Pass: Consolidation is flat (normalized slope {normalized_slope:.6f} <= {dynamic_max_slope:.4f})")
 
-    recent_prices = prices[consolidation_end_idx:]
-    print(f"Recent max price: ${np.max(recent_prices):.2f}, Breakout threshold: ${consolidation_max * 1.02:.2f}")
+    # Look back over the final 30 days to see EXACTLY when the condition triggered
+    eval_start_idx = max(bottom_idx + 60, current_idx - 30)
+    recent_prices = prices[eval_start_idx:]
+    
+    # NEW: We want to catch the breakout early. Instead of waiting for it to clear
+    # the maximum price of the consolidation by 2% (1.02), we will trigger it
+    # the very day it breaks the consolidation max (1.00) or just slightly below it if we want to be aggressive.
+    breakout_threshold = 1.00 # Trigger exactly on the break of the resistance line
+    
+    print(f"Recent max price: ${np.max(recent_prices):.2f}, Breakout threshold: ${consolidation_max * breakout_threshold:.2f}")
     
     breakout_idx = -1
     for i, p in enumerate(recent_prices):
-        if p > (consolidation_max * 1.02):
-            breakout_idx = consolidation_end_idx + i
+        # Trigger the precise day it closes above the 90th percentile of the base
+        if p > (consolidation_max * breakout_threshold):
+            breakout_idx = eval_start_idx + i
             break
             
     if breakout_idx == -1:
@@ -129,7 +142,7 @@ def debug_pattern(ticker, start_date=None, end_date=None, period="2y"):
         return
     else:
         breakout_date = df.index[breakout_idx]
-        print(f"Pass: Breakout detected! Triggered on {breakout_date.strftime('%Y-%m-%d')} at price ${recent_prices[breakout_idx - consolidation_end_idx]:.2f}")
+        print(f"Pass: Breakout detected! Triggered on {breakout_date.strftime('%Y-%m-%d')} at price ${recent_prices[breakout_idx - eval_start_idx]:.2f}")
         
     avg_vol = df['Volume'].iloc[bottom_idx : consolidation_end_idx].mean()
     recent_vol = df['Volume'].iloc[breakout_idx]

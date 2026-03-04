@@ -55,8 +55,8 @@ def find_consolidation_breakout(df: pd.DataFrame,
         return False
 
     # 2. Analyze the Consolidation Period (T2)
-    # Breakout window is the most recent 5 days
-    breakout_window = 5
+    # Breakout window is the most recent 30 days
+    breakout_window = 30
     current_idx = len(prices) - 1
     
     consolidation_end_idx = current_idx - breakout_window
@@ -74,8 +74,9 @@ def find_consolidation_breakout(df: pd.DataFrame,
     if len(consolidation_data) == 0: 
         return False
     
-    consolidation_max = np.max(consolidation_data)
-    consolidation_min = np.min(consolidation_data)
+    # NEW: Use 95th percentile and 5th percentile to ignore extreme 1-day wicks
+    consolidation_max = np.percentile(consolidation_data, 95)
+    consolidation_min = np.percentile(consolidation_data, 5)
     
     # Dynamic range allowed: lower priced stocks (which have huge % moves on small $ moves) 
     # get a wider band than $100+ stocks
