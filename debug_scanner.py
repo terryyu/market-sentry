@@ -1,166 +1,199 @@
 import pandas as pd
 import numpy as np
-from scipy.signal import find_peaks
 from scipy.stats import linregress
 import yfinance as yf
+
 
 def debug_pattern(ticker, start_date=None, end_date=None, period="2y"):
     print(f"\n=======================================================")
     print(f"--- Debugging {ticker} ---")
     ticker_obj = yf.Ticker(ticker)
-    
+
     if start_date and end_date:
         df = ticker_obj.history(start=start_date, end=end_date, interval="1d")
         print(f"Using date range: {start_date} to {end_date} (Found {len(df)} days)")
     else:
         df = ticker_obj.history(period=period, interval="1d")
         print(f"Using period: {period} (Found {len(df)} days)")
-    
-    if len(df) < 150: # Reduced from 252 so we can test smaller historical slices
-        print(f"Fail: Not enough data (< 150 days)")
+
+    if len(df) < 150:
+        print(f"Fail: Not enough data (<150 days)")
         return
-        
+
     prices = df['Close'].values
-    
-    # 1. Find prominent peaks and troughs
-    # prominence is based on absolute price changes (e.g., $5 drops) rather than relative
-    # this helps catch massive drops like HOOD that went from $80 to $8
-    peaks, _ = find_peaks(prices, distance=30, prominence=5)
-    troughs, _ = find_peaks(-prices, distance=30, prominence=5)
-    
-    if len(peaks) == 0 or len(troughs) == 0:
-        print(f"Fail: Not enough peaks/troughs (peaks found: {len(peaks)}, troughs found: {len(troughs)})")
+    volumes = df['Volume'].values
+
+    # ─── Phase 1: Find the structural peak and subsequent decline ───
+    # Find the HIGHEST price point that precedes a significant decline (≥30%).
+    min_decline_pct = 0.30
+    min_decline_days = 20
+
+    peak_idx = None
+    trough_idx = None
+
+    for candidate_peak in range(len(prices) - min_decline_days):
+        future_prices = prices[candidate_peak + 1:]
+        future_min_offset = np.argmin(future_prices)
+        future_min_idx = candidate_peak + 1 + future_min_offset
+        decline_pct = (prices[candidate_peak] - prices[future_min_idx]) / prices[candidate_peak]
+
+        if decline_pct >= min_decline_pct:
+            if peak_idx is None or prices[candidate_peak] > prices[peak_idx]:
+                peak_idx = candidate_peak
+                trough_idx = future_min_idx
+
+    if peak_idx is None or trough_idx is None:
+        print("Fail: No significant peak-to-trough decline (≥30%) found")
         return
-        
-    last_peak_idx = peaks[-1]
-    
-    subsequent_troughs = troughs[troughs > last_peak_idx]
-    
-    if len(subsequent_troughs) == 0:
-        print("Fail: No major troughs found AFTER the last major peak")
-        return
-        
-    bottom_idx = subsequent_troughs[0]
-    
-    t1_decline_days = bottom_idx - last_peak_idx
-    print(f"Metrics -> Peak Index: {last_peak_idx}, Bottom Index: {bottom_idx}")
-    if t1_decline_days < 20: 
-        print(f"Fail: Decline period too short (T1 = {t1_decline_days} days < 20)")
+
+    decline_pct = (prices[peak_idx] - prices[trough_idx]) / prices[peak_idx]
+    t1_decline_days = trough_idx - peak_idx
+
+    print(f"Structural Peak: day {peak_idx} ({df.index[peak_idx].strftime('%Y-%m-%d')}) = ${prices[peak_idx]:.2f}")
+    print(f"Trough: day {trough_idx} ({df.index[trough_idx].strftime('%Y-%m-%d')}) = ${prices[trough_idx]:.2f}")
+    print(f"Decline: {decline_pct*100:.1f}% over {t1_decline_days} days")
+
+    if t1_decline_days < min_decline_days:
+        print(f"Fail: Decline period too short (T1 = {t1_decline_days} days < {min_decline_days})")
         return
     else:
         print(f"Pass: Decline period T1 = {t1_decline_days} days")
 
-    # 2. Analyze the Consolidation Period (T2)
-    # The mathematical base should end 5 days before the end of the query period
-    breakout_window = 5
+    # ─── Phase 2: Analyze the consolidation base ───
+    breakout_window = 30
     current_idx = len(prices) - 1
     consolidation_end_idx = current_idx - breakout_window
-    
-    if bottom_idx >= consolidation_end_idx:
-        print("Fail: Bottom is too recent, so there is no consolidation period")
+
+    if trough_idx >= consolidation_end_idx:
+        print("Fail: Trough is too recent, no consolidation period")
         return
-        
-    t2_consolidation_days = consolidation_end_idx - bottom_idx
-    
-    # Calculate required consolidation time
-    # Normally 2x the decline. But max out the *requirement* at 90 days so 
-    # massive multi-year crashes don't demand 2+ year flat bases.
-    required_t2 = min(2 * t1_decline_days, 90)
-    
+
+    t2_consolidation_days = consolidation_end_idx - trough_idx
+
+    # Scale minimum base duration with decline severity
+    if decline_pct >= 0.50:
+        required_min_days = 200
+    elif decline_pct >= 0.30:
+        required_min_days = 120
+    else:
+        required_min_days = 60
+
+    required_t2 = max(required_min_days, min(2 * t1_decline_days, 90))
+
     if t2_consolidation_days < required_t2:
         print(f"Fail: Consolidation too short (T2 = {t2_consolidation_days} days < required {required_t2} days)")
-        return
-    elif t2_consolidation_days < 60:
-        print(f"Fail: Consolidation too short. Met the 2x rule, but T2 = {t2_consolidation_days} days < 60 days (3 months)")
+        print(f"  (Decline was {decline_pct*100:.0f}%, requiring min {required_min_days} days)")
         return
     else:
-        print(f"Pass: Consolidation period T2 = {t2_consolidation_days} days (>= 2*T1 and >= 60 days)")
-        
-    consolidation_data = prices[bottom_idx : consolidation_end_idx]
-    if len(consolidation_data) == 0: 
+        print(f"Pass: Consolidation T2 = {t2_consolidation_days} days (>= {required_t2})")
+
+    consolidation_data = prices[trough_idx:consolidation_end_idx]
+    if len(consolidation_data) == 0:
         print("Fail: Consolidation data is empty")
         return
-    
-    # NEW: Use 90th percentile and 10th percentile to define the "Core" consolidation band
-    # This ignores the top 10% of wicks, allowing us to find the structural resistance line lower
-    consolidation_max = np.percentile(consolidation_data, 90)
-    consolidation_min = np.percentile(consolidation_data, 10)
-    
+
+    # Use P90/P10 for the core band, and actual max for breakout threshold
+    consolidation_p90 = np.percentile(consolidation_data, 90)
+    consolidation_p10 = np.percentile(consolidation_data, 10)
+    consolidation_max = np.max(consolidation_data)
+
     avg_price = np.mean(consolidation_data)
-    dynamic_max_range = 1.15
+    dynamic_max_range = 1.50
     if avg_price < 20.0:
-        dynamic_max_range = 2.50
+        dynamic_max_range = 1.80
     elif avg_price < 50.0:
         dynamic_max_range = 1.50
-    
-    print(f"Consolidation range: Min = ${consolidation_min:.2f}, Max = ${consolidation_max:.2f}")
-    if consolidation_max > consolidation_min * dynamic_max_range:
-        print(f"Fail: Consolidation range too wide. Max is > {dynamic_max_range} * Min. (Ratio: {consolidation_max/consolidation_min:.2f})")
-        return 
-    else:
-        print(f"Pass: Consolidation range is tight enough (Ratio: {consolidation_max/consolidation_min:.2f} <= {dynamic_max_range})")
 
-    # NEW: Slope check
+    ratio = consolidation_p90 / consolidation_p10
+    print(f"Consolidation band: P10=${consolidation_p10:.2f}, P90=${consolidation_p90:.2f}, Max=${consolidation_max:.2f}")
+    print(f"Range ratio (P90/P10): {ratio:.2f}, Max allowed: {dynamic_max_range}")
+    if ratio > dynamic_max_range:
+        print(f"Fail: Consolidation range too wide")
+        return
+    else:
+        print(f"Pass: Consolidation range OK")
+
+    # Flatness check via linear regression
     x = np.arange(len(consolidation_data))
     slope, _, _, _, _ = linregress(x, consolidation_data)
-    avg_price = np.mean(consolidation_data)
     normalized_slope = abs(slope) / avg_price
-    
+
     dynamic_max_slope = 0.0015
     if avg_price < 20.0:
-        dynamic_max_slope = 0.030
+        dynamic_max_slope = 0.015
     elif avg_price < 50.0:
         dynamic_max_slope = 0.0075
-    
-    print(f"Consolidation Slope (normalized): {normalized_slope:.6f}")
-    if normalized_slope > dynamic_max_slope:
-        print(f"Fail: Consolidation is not flat enough (normalized slope {normalized_slope:.6f} > {dynamic_max_slope:.4f}). The stock is trending, not consolidating.")
-        return
-    else:
-        print(f"Pass: Consolidation is flat (normalized slope {normalized_slope:.6f} <= {dynamic_max_slope:.4f})")
 
-    # Look back over the final 30 days to see EXACTLY when the condition triggered
-    eval_start_idx = max(bottom_idx + 60, current_idx - 30)
-    recent_prices = prices[eval_start_idx:]
-    
-    # NEW: We want to catch the breakout early. Instead of waiting for it to clear
-    # the maximum price of the consolidation by 2% (1.02), we will trigger it
-    # the very day it breaks the consolidation max (1.00) or just slightly below it if we want to be aggressive.
-    breakout_threshold = 1.00 # Trigger exactly on the break of the resistance line
-    
-    print(f"Recent max price: ${np.max(recent_prices):.2f}, Breakout threshold: ${consolidation_max * breakout_threshold:.2f}")
-    
-    breakout_idx = -1
+    print(f"Consolidation slope (normalized): {normalized_slope:.6f}, Max allowed: {dynamic_max_slope:.4f}")
+    if normalized_slope > dynamic_max_slope:
+        print(f"Fail: Not flat enough — stock is trending, not consolidating")
+        return
+    else:
+        print(f"Pass: Flat consolidation")
+
+    # ─── Phase 3: Detect the breakout ───
+    recent_prices = prices[consolidation_end_idx:]
+    breakout_threshold = 1.02
+
+    print(f"\nBreakout check: recent max ${np.max(recent_prices):.2f} vs threshold ${consolidation_max * breakout_threshold:.2f} (consolidation max ${consolidation_max:.2f} × {breakout_threshold})")
+
+    if np.max(recent_prices) < (consolidation_max * breakout_threshold):
+        print("Fail: No breakout detected — price didn't exceed consolidation max")
+        return
+
+    # Find the first breakout day
+    breakout_day_idx = None
     for i, p in enumerate(recent_prices):
-        # Trigger the precise day it closes above the 90th percentile of the base
-        if p > (consolidation_max * breakout_threshold):
-            breakout_idx = eval_start_idx + i
+        if p > consolidation_max:
+            breakout_day_idx = consolidation_end_idx + i
             break
-            
-    if breakout_idx == -1:
-        print("Fail: No breakout detected in recent prices")
+
+    if breakout_day_idx is None:
+        print("Fail: Could not find specific breakout day")
+        return
+
+    breakout_date = df.index[breakout_day_idx]
+    print(f"Pass: Breakout on {breakout_date.strftime('%Y-%m-%d')} at ${prices[breakout_day_idx]:.2f}")
+
+    # Multi-day volume confirmation
+    avg_base_vol = np.mean(volumes[trough_idx:consolidation_end_idx])
+
+    # 5-day average around breakout
+    vol_window_start = max(breakout_day_idx - 2, 0)
+    vol_window_end = min(breakout_day_idx + 3, len(volumes))
+    avg_breakout_vol_5d = np.mean(volumes[vol_window_start:vol_window_end])
+
+    # Max single day in breakout window
+    max_single_day_vol = np.max(volumes[consolidation_end_idx:])
+    max_vol_day_idx = consolidation_end_idx + np.argmax(volumes[consolidation_end_idx:])
+
+    print(f"\nVolume analysis:")
+    print(f"  Base avg volume: {avg_base_vol:,.0f}")
+    print(f"  5-day avg around breakout: {avg_breakout_vol_5d:,.0f} ({avg_breakout_vol_5d/avg_base_vol:.2f}x)")
+    print(f"  Max single-day volume: {max_single_day_vol:,.0f} ({max_single_day_vol/avg_base_vol:.2f}x) on {df.index[max_vol_day_idx].strftime('%Y-%m-%d')}")
+
+    vol_pass = (avg_breakout_vol_5d >= avg_base_vol * 1.3 or
+                max_single_day_vol >= avg_base_vol * 2.0)
+
+    if not vol_pass:
+        print("Fail: Breakout volume not confirmed (need 5d avg ≥1.3x OR any day ≥2.0x base avg)")
         return
     else:
-        breakout_date = df.index[breakout_idx]
-        print(f"Pass: Breakout detected! Triggered on {breakout_date.strftime('%Y-%m-%d')} at price ${recent_prices[breakout_idx - eval_start_idx]:.2f}")
-        
-    avg_vol = df['Volume'].iloc[bottom_idx : consolidation_end_idx].mean()
-    recent_vol = df['Volume'].iloc[breakout_idx]
-    
-    print(f"Breakout Volume: {recent_vol:,.0f}, Avg Consolidation Volume: {avg_vol:,.0f}")
-    if recent_vol < (avg_vol * 1.5):
-        print("Fail: Breakout volume not high enough (recent volume < 1.5x avg volume)")
-        return
-    else:
-        print("Pass: Strong volume detected!")
-    
-    print("SUCCESS: Target Pattern Matched!")
+        reason = []
+        if avg_breakout_vol_5d >= avg_base_vol * 1.3:
+            reason.append(f"5d avg {avg_breakout_vol_5d/avg_base_vol:.2f}x ≥ 1.3x")
+        if max_single_day_vol >= avg_base_vol * 2.0:
+            reason.append(f"single day {max_single_day_vol/avg_base_vol:.2f}x ≥ 2.0x")
+        print(f"Pass: Volume confirmed ({', '.join(reason)})")
+
+    print("\n✅ SUCCESS: Long Base Consolidation Breakout Detected!")
+
 
 if __name__ == "__main__":
     test_tickers = ["AAPL", "TSLA"]
     for t in test_tickers:
         debug_pattern(t)
-        
+
     # User's specific Robinhood test
-    # Testing Robinhood history data, from IPO (2021) to 2024 March to catch the true peak
+    # Testing Robinhood history data, from IPO (2021) to 2024 March to catch the true breakout
     debug_pattern("HOOD", start_date="2021-08-01", end_date="2024-03-31")
