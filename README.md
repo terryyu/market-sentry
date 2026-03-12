@@ -24,9 +24,10 @@ uv run python debug_scanner.py
 | `fetch_tickers.py` | Fetches NASDAQ large/mega cap tickers from Nasdaq API |
 | `main.py` | Entry point |
 
-## Algorithm: Long Base Consolidation Breakout
+## Algorithms
 
-The pattern has three phases:
+### 1. Long Base Consolidation Breakout
+The stock crashes, builds a long base, and breaks out.
 
 ```
      Peak ($70)
@@ -34,38 +35,32 @@ The pattern has three phases:
      /  \
     /    \  ← Phase 1: Significant decline (≥30%)
    /      \
-  /        \_______/\___/\___/\____  ← Phase 2: Long flat consolidation
+  /        \_______/\___/\___/\____  ← Phase 2: Long flat consolidation (≥60-200 days)
                                     \
                                      ↗ ← Phase 3: Breakout with volume
 ```
+**Key Rules:**
+- Base duration scales with decline: ≥50% drop needs 200 days, ≥30% needs 120 days.
+- Max range ratio (P90/P10) is 1.50 (1.80 for cheap stocks).
 
-### Detection Logic
+### 2. Flat Base Breakout
+The stock establishes a prior uptrend, consolidates tightly for a shorter period, and breaks out.
 
-**Phase 1 — Find Structural Peak & Decline:**
-- Finds the highest price point that precedes a ≥30% decline
-- Uses the actual highest price (not `find_peaks` last peak) to avoid picking minor bumps within the base
+```
+                                     ↗ ← Phase 3: Breakout with volume
+                                    /
+            _______/\___/\___/\____/ ← Phase 2: Tight flat consolidation (≥30 days)
+           /
+          / ← Phase 1: Prior Uptrend
+         /
+```
+**Key Rules:**
+- Prior uptrend: Price 60 days before the base must be ≥15% lower than the base average.
+- Very tight range: Max range ratio (P90/P10) is strictly **1.25**.
 
-**Phase 2 — Consolidation Base:**
-- Base duration scales with decline severity:
-  - ≥50% decline → ≥200 trading days (~10 months)
-  - ≥30% decline → ≥120 trading days (~6 months)
-- P90/P10 range ratio must be ≤1.80 (cheap stocks) or ≤1.50 (others)
-- Linear regression slope must be near-zero (flat, not trending)
-
-**Phase 3 — Breakout Confirmation:**
-- Price must exceed the **actual consolidation maximum** (structural resistance)
-- Volume confirmed via: 5-day avg ≥1.3× base avg **OR** any single day ≥2.0× base avg
-
-### Key Parameters
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `min_decline_pct` | 0.30 | Minimum decline from peak to trough (30%) |
-| `min_decline_days` | 20 | Minimum trading days for the decline |
-| `max_consolidation_range` | 1.50 | Max P90/P10 ratio (dynamically adjusted for price) |
-| `max_consolidation_slope` | 0.0015 | Max normalized slope (dynamically adjusted) |
-| `breakout_threshold` | 1.02 | Price must be ≥102% of consolidation max |
-| `volume_multiplier` | 1.3 | 5-day avg volume must be ≥1.3× base avg |
+### Shared Breakout Logic
+- Price must exceed the **actual consolidation maximum** (structural resistance).
+- Volume confirmed via: 5-day avg ≥1.3× base avg **OR** any single day ≥2.0× base avg.
 
 ## Testing Against Known Patterns
 
@@ -73,19 +68,17 @@ Edit the `__main__` block in `debug_scanner.py` to test specific tickers:
 
 ```python
 # Test with custom date range
-debug_pattern("HOOD", start_date="2021-08-01", end_date="2024-03-31")
-
-# Test with default 2-year lookback
-debug_pattern("AAPL")
+debug_long_base_pattern("HOOD", start_date="2021-08-01", end_date="2024-03-31")
+debug_flat_base_pattern("NVDA", start_date="2023-08-01", end_date="2024-02-28")
 ```
 
 ### Validated Cases
 
-| Ticker | Date Range | Result | Reason |
-|--------|-----------|--------|--------|
-| HOOD | 2021-08 → 2024-03 | ✅ Match | Textbook long base breakout on 2024-02-14 |
-| AAPL | 2y | ❌ Reject | Trending up, not flat consolidation |
-| TSLA | 2y | ❌ Reject | Base too short for decline severity |
+| Ticker | Pattern | Date Range | Result | Reason |
+|--------|---------|------------|--------|--------|
+| HOOD | Long Base | 2021-08 → 2024-03 | ✅ Match | Textbook long base breakout on 2024-02-14 |
+| NVDA | Flat Base | 2023-08 → 2024-02 | ✅ Match | Found the $40-$50 tight base and Jan 2024 breakout |
+| AAPL | n/a | 2y | ❌ Reject | Trending up, neither base pattern fits |
 
 ## Development
 
